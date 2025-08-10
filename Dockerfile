@@ -20,7 +20,7 @@ USER appuser
 VOLUME ["/data"]
 ENV STATE_DB=/data/state.sqlite3
 
-# Default: run in daemon mode with a 10-minute interval
+# Defaults
 ENV MODE=daemon
 ENV POLL_MINUTES=10
 

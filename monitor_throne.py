@@ -25,6 +25,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("throne-monitor")
 
+# File logging (rotating) to /data by default so logs persist on TrueNAS SCALE
+LOG_TO_FILE = os.getenv("LOG_TO_FILE", "true").lower() == "true"
+LOG_FILE = os.getenv("LOG_FILE", "/data/monitor.log")
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))  # 2MB
+LOG_BACKUPS = int(os.getenv("LOG_BACKUPS", "3"))
+try:
+    if LOG_TO_FILE:
+        from logging.handlers import RotatingFileHandler
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS)
+        fh.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(fh)
+except Exception as _e:
+    logger.warning("Failed to initialize file logging: %s", _e)
+
 STATE_DB = os.getenv("STATE_DB", "/data/state.sqlite3")
 POLL_MINUTES = int(os.getenv("POLL_MINUTES", "10"))
 MODE = os.getenv("MODE", "daemon")
@@ -81,11 +97,9 @@ def normalize_target(t: str) -> str:
     # Accept username or full URL
     if t.startswith("http://") or t.startswith("https://"):
         return t
-    # Assume username; build a canonical URL
     return f"https://throne.com/u/{t}/wishlist"
 
 def extract_items_next_data(html: str):
-    # Try Next.js __NEXT_DATA__
     soup = BeautifulSoup(html, "lxml")
     script = soup.find("script", id="__NEXT_DATA__")
     if not script or not script.string:
@@ -95,16 +109,13 @@ def extract_items_next_data(html: str):
     except Exception:
         return None
 
-    # Heuristic search for items array anywhere in the JSON
     items = []
 
     def deep_iter(node, path=""):
         nonlocal items
         if isinstance(node, dict):
-            # If dict contains 'items' that looks like a list of products, capture
             if "items" in node and isinstance(node["items"], list):
                 maybe = node["items"]
-                # Check minimal product-like shape
                 if any(isinstance(x, dict) and ("name" in x or "title" in x) for x in maybe):
                     items = maybe
             for k, v in node.items():
@@ -118,7 +129,6 @@ def extract_items_next_data(html: str):
     if not items:
         return None
 
-    # Normalize
     normalized = []
     for it in items:
         name = it.get("name") or it.get("title") or ""
@@ -134,7 +144,6 @@ def extract_items_next_data(html: str):
         if isinstance(price, int):
             price_cents = price
         elif isinstance(price, (float, str)):
-            # Attempt parse like "12.34"
             try:
                 price_cents = int(round(float(str(price).replace("$","").strip())*100))
             except Exception:
@@ -152,16 +161,13 @@ def extract_items_next_data(html: str):
     return normalized
 
 def extract_items_html(html: str):
-    # Fallback HTML parsing: look for product-ish cards/links with price
     soup = BeautifulSoup(html, "lxml")
 
     candidates = []
-    # Generic card query
     for card in soup.select("[class*='card'],[class*='Card'],[data-testid*='item'],article,li"):
         text = card.get_text(" ", strip=True)
         if not text or len(text) < 3:
             continue
-        # search for price like $12.34
         m = re.search(r"(?<!\w)([\\$€£])\\s?([0-9]+(?:[\\.,][0-9]{2})?)", text)
         currency = "USD"
         price_cents = -1
@@ -175,7 +181,6 @@ def extract_items_html(html: str):
                 price_cents = int(round(float(num)*100))
             except Exception:
                 price_cents = -1
-        # name heuristic: title-like element
         name_el = card.select_one("h3,h2,.title,[class*='title']")
         name = name_el.get_text(" ", strip=True) if name_el else text[:120]
 
@@ -204,11 +209,12 @@ def extract_items_html(html: str):
             "available": 1,
         })
 
-    # Deduplicate by item_id
     uniq = {}
     for c in candidates:
         uniq[c["item_id"]] = c
     return list(uniq.values())
+
+from tenacity import RetryError
 
 @retry(wait=wait_exponential_jitter(initial=1, max=30), stop=stop_after_attempt(5))
 def fetch(url: str) -> str:
@@ -233,14 +239,12 @@ def diff_and_store(wishlist_id: str, items: list):
     ts = now_utc_iso()
     with sqlite3.connect(STATE_DB) as con:
         cur = con.cursor()
-        # Load previous snapshot for this wishlist
         cur.execute("SELECT item_id, name, price_cents FROM items WHERE wishlist_id=?", (wishlist_id,))
         prev = {row[0]: {"name": row[1], "price_cents": row[2]} for row in cur.fetchall()}
         current_ids = set()
 
         added, removed, price_changes = [], [], []
 
-        # Upsert current items
         for it in items:
             item_id = it["item_id"]
             current_ids.add(item_id)
@@ -270,15 +274,12 @@ def diff_and_store(wishlist_id: str, items: list):
                     cur.execute("INSERT INTO events (ts,wishlist_id,event_type,item_id,name,from_price_cents,to_price_cents) VALUES (?,?,?,?,?,?,?)",
                                 (ts, wishlist_id, "price_change", item_id, it["name"], before, after))
 
-        # Removed items = in prev but not in current
         removed_ids = set(prev.keys()) - current_ids
         for rid in removed_ids:
             name = prev[rid]["name"]
             removed.append({"item_id": rid, "name": name})
             cur.execute("INSERT INTO events (ts,wishlist_id,event_type,item_id,name,from_price_cents,to_price_cents) VALUES (?,?,?,?,?,?,?)",
                         (ts, wishlist_id, "removed", rid, name, None, None))
-            # We keep the item row (historical), but mark last_seen as ts was not updated above
-            # Optionally, could delete or set available=0
 
         con.commit()
 
@@ -313,7 +314,10 @@ def send_email(subject: str, body: str):
             server.login(SMTP_USER, SMTP_PASS)
         server.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
     finally:
-        server.quit()
+        try:
+            server.quit()
+        except Exception:
+            pass
 
 def summarize_changes(wishlist_id: str, added, removed, price_changes):
     lines = [f"Wishlist: {wishlist_id}"]
@@ -333,7 +337,6 @@ def summarize_changes(wishlist_id: str, added, removed, price_changes):
 
 def jitter_sleep(minutes: int):
     base = max(1, minutes)
-    # 10% jitter
     jitter = random.uniform(-0.1*base, 0.1*base)
     total = base + jitter
     time.sleep(total * 60)
@@ -367,11 +370,18 @@ def run_once():
 def run_daemon():
     logger.info("Starting daemon; poll every %d minutes", POLL_MINUTES)
     while True:
-        run_once()
+        try:
+            run_once()
+        except Exception as e:
+            logger.exception("Unhandled error in run_once: %s", e)
         jitter_sleep(POLL_MINUTES)
 
 if __name__ == "__main__":
-    if MODE == "once":
-        sys.exit(run_once())
-    else:
-        sys.exit(run_daemon())
+    try:
+        if MODE == "once":
+            sys.exit(run_once())
+        else:
+            sys.exit(run_daemon())
+    except Exception as e:
+        logger.exception("Fatal error: %s", e)
+        sys.exit(2)

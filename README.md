@@ -15,7 +15,7 @@ It stores state in a SQLite DB (`/data/state.sqlite3`) so it can diff snapshots 
 
 ```bash
 # 1) Download this project
-# 2) Edit .env with your details (targets + SMTP settings)
+# 2) Edit docker-compose.yml with your details (targets + SMTP settings)
 # 3) Build and run
 docker compose up -d --build
 ```
@@ -43,6 +43,9 @@ Edit `docker-compose.yml` environment section:
   - `LOG_LEVEL=DEBUG|INFO|WARNING|ERROR`
 
 - Optional: `USER_AGENT`, `PROXY_URL`
+
+- **Logging to file**: set `LOG_TO_FILE=true` (default) to write all logs to `/data/monitor.log`.  
+  You can also adjust `LOG_FILE`, `LOG_MAX_BYTES`, and `LOG_BACKUPS` for rotation.
 
 ---
 
@@ -78,17 +81,6 @@ Set `THRONE_TARGETS` to multiple users/URLs separated by commas. Each wishlist i
 
 ---
 
-## Notes & Tips
-
-- The monitor respects basic backoff and random jitter to be polite.  
-- Consider increasing `POLL_MINUTES` to reduce load.  
-- If the site introduces aggressive bot protection/CAPTCHA, you may need to add a residential proxy via `PROXY_URL` and/or set a realistic `USER_AGENT`.
-- The code is organized so you can add a custom extractor if your page variant needs it.
-
----
-
----
-
 ## Using the prebuilt image from GHCR
 
 You can skip building locally and pull the image directly from GitHub Container Registry:
@@ -113,10 +105,15 @@ services:
       USER_AGENT: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
       PROXY_URL: ""
       LOG_LEVEL: "INFO"
+      LOG_TO_FILE: "true"
+      LOG_FILE: "/data/monitor.log"
+      LOG_MAX_BYTES: 2097152
+      LOG_BACKUPS: 3
     volumes:
       - ./data:/data
 ```
 
+---
 
 ## License
 
