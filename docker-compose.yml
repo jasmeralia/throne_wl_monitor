@@ -1,0 +1,20 @@
+services:
+  throne-monitor:
+    image: ghcr.io/jasmeralia/throne_wl_monitor:latest
+    # build: .   # Uncomment to build locally
+    container_name: throne-monitor
+    restart: unless-stopped
+    environment:
+      THRONE_TARGETS: "morgan,https://throne.com/u/someone/wishlist"
+      EMAIL_TO: "your@email.com"
+      EMAIL_FROM: "throne-monitor@yourdomain.com"
+      SMTP_HOST: "smtp.yourdomain.com"
+      SMTP_PORT: 587
+      SMTP_USER: "throne-monitor@yourdomain.com"
+      SMTP_PASS: "yourpassword"
+      SMTP_USE_SSL: "false"
+      MODE: "daemon"           # daemon | once
+      POLL_MINUTES: 10
+      USER_AGENT: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      PROXY_URL: ""
+      LOG_LEVEL: "INFO"
