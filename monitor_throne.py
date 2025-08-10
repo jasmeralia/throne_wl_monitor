@@ -530,7 +530,7 @@ def send_email(subject: str, body: str):
             pass
 
 def summarize_changes(wishlist_id: str, added, removed, price_changes):
-    lines = [f"Wishlist: {wishlist_id}"]
+    lines = [f"Throne Wishlist: {wishlist_id}"]
     if added:
         lines.append("\nAdded:")
         for it in added:
