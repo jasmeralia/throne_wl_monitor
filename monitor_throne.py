@@ -18,6 +18,174 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
+DEBUG_DUMP_HTML = os.getenv("DEBUG_DUMP_HTML", "true").lower() == "true"
+DEBUG_LOG_SAMPLES = os.getenv("DEBUG_LOG_SAMPLES", "true").lower() == "true"
+
+def extract_items_jsonld(html: str):
+    r"""Try to parse <script type="application/ld+json"> looking for ItemList."""
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    for s in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            data = json.loads(s.string or "{}")
+        except Exception:
+            continue
+        # Normalize array or object
+        candidates = data if isinstance(data, list) else [data]
+        for d in candidates:
+            if not isinstance(d, dict):
+                continue
+            if d.get("@type") in ("ItemList", "Collection") or "itemListElement" in d:
+                elements = d.get("itemListElement", [])
+                for el in elements:
+                    # el can be {"@type":"ListItem","item":{...}}
+                    node = el.get("item", el) if isinstance(el, dict) else el
+                    if not isinstance(node, dict):
+                        continue
+                    name = node.get("name") or node.get("title") or ""
+                    url = node.get("url") or node.get("@id") or ""
+                    image = node.get("image") or ""
+                    offers = node.get("offers") or {}
+                    currency = offers.get("priceCurrency") or "USD"
+                    price = offers.get("price") or offers.get("priceAmount")
+                    price_cents = -1
+                    if price is not None:
+                        try:
+                            price_cents = int(round(float(str(price).replace(",", ".").strip())*100))
+                        except Exception:
+                            price_cents = -1
+                    key = url or name
+                    if not key:
+                        continue
+                    item_id = hashlib.sha1(key.encode()).hexdigest()
+                    items.append({
+                        "item_id": item_id,
+                        "name": str(name).strip(),
+                        "price_cents": price_cents,
+                        "currency": currency,
+                        "product_url": url,
+                        "image_url": image if isinstance(image, str) else (image[0] if isinstance(image, list) and image else ""),
+                        "available": 1,
+                    })
+    # Dedup
+    uniq = {it["item_id"]: it for it in items}
+    return list(uniq.values())
+
+def extract_items_jsonld(html: str):
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except Exception:
+            continue
+        # Normalize to list
+        data_list = data if isinstance(data, list) else [data]
+        for d in data_list:
+            # Look for ItemList or Product entries
+            if d.get("@type") == "ItemList" and isinstance(d.get("itemListElement"), list):
+                for el in d["itemListElement"]:
+                    item = el.get("item") if isinstance(el, dict) else el
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name") or ""
+                    url = item.get("url") or ""
+                    # offers may be dict or list
+                    offers = item.get("offers")
+                    price_cents = -1
+                    currency = "USD"
+                    if isinstance(offers, dict):
+                        price = offers.get("price")
+                        currency = offers.get("priceCurrency") or currency
+                        try:
+                            if price is not None:
+                                price_cents = int(round(float(str(price))*100))
+                        except Exception:
+                            pass
+                    elif isinstance(offers, list) and offers:
+                        off = offers[0]
+                        price = off.get("price")
+                        currency = off.get("priceCurrency") or currency
+                        try:
+                            if price is not None:
+                                price_cents = int(round(float(str(price))*100))
+                        except Exception:
+                            pass
+                    item_id = item.get("@id") or (url and hashlib.sha1(url.encode()).hexdigest())
+                    out.append({
+                        "item_id": str(item_id) if item_id else hashlib.sha1((name+url).encode()).hexdigest(),
+                        "name": name.strip(),
+                        "price_cents": price_cents,
+                        "currency": currency,
+                        "product_url": url or "",
+                        "image_url": (item.get("image") or ""),
+                        "available": 1,
+                    })
+    # Deduplicate by item_id
+    uniq = {}
+    for c in out:
+        uniq[c["item_id"]] = c
+    return list(uniq.values())
+
+def extract_items_grid(html: str):
+    soup = BeautifulSoup(html, "lxml")
+    items = []
+    price_re = re.compile(r"(?<!\w)([$€£])\s?([0-9]+(?:[.,][0-9]{2})?)")
+    # Find all anchors that look like gift cards (exclude header/footer/nav)
+    for a in soup.find_all("a", href=True):
+        txt = a.get_text(" ", strip=True)
+        if not txt or len(txt) < 3:
+            continue
+        # Skip obvious nav/login links
+        lower = txt.lower()
+        if any(k in lower for k in ("login","sign up","about","contact","faq","feature requests","how it works","follow","wishlist","gifters")):
+            continue
+        # Try to find a nearby price within the same card block (ancestor within 3 levels)
+        price_cents = -1
+        currency = "USD"
+        container = a
+        found_price = None
+        for _ in range(4):
+            if container is None:
+                break
+            text_block = container.get_text(" ", strip=True)
+            m = price_re.search(text_block or "")
+            if m:
+                symbol, num = m.groups()
+                if symbol == "€":
+                    currency = "EUR"
+                elif symbol == "£":
+                    currency = "GBP"
+                try:
+                    price_cents = int(round(float(num.replace(",", "."))*100))
+                except Exception:
+                    price_cents = -1
+                found_price = True
+                break
+            container = container.parent
+        if not found_price:
+            continue
+        href = a["href"]
+        # Normalize throne-relative links
+        if href.startswith("/"):
+            href = "https://throne.com" + href
+        item_id = hashlib.sha1(href.encode()).hexdigest() if href else hashlib.sha1(txt.encode()).hexdigest()
+        items.append({
+            "item_id": item_id,
+            "name": txt,
+            "price_cents": price_cents,
+            "currency": currency,
+            "product_url": href or "",
+            "image_url": "",
+            "available": 1,
+        })
+    # Dedup by name+url to reduce noise
+    uniq = {}
+    for it in items:
+        key = (it["product_url"], it["name"])
+        uniq[key] = it
+    return list(uniq.values())
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -46,6 +214,8 @@ POLL_MINUTES = int(os.getenv("POLL_MINUTES", "10"))
 MODE = os.getenv("MODE", "daemon")
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
+DEBUG_DUMP_HTML = os.getenv("DEBUG_DUMP_HTML", "true").lower() == "true"
+DEBUG_LOG_SAMPLES = os.getenv("DEBUG_LOG_SAMPLES", "true").lower() == "true"
 
 EMAIL_TO = os.getenv("EMAIL_TO", "").strip()
 EMAIL_FROM = os.getenv("EMAIL_FROM", "").strip()
@@ -61,6 +231,25 @@ SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT})
 if PROXY_URL:
     SESSION.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
+
+
+def _sanitize_filename(url: str) -> str:
+    safe = re.sub(r'[^a-zA-Z0-9._-]+', '_', url)
+    return safe[:150]
+
+def _debug_dump_html(url: str, html: str):
+    if not DEBUG_DUMP_HTML:
+        return
+    try:
+        dbg_dir = os.path.join(os.path.dirname(STATE_DB), "debug")
+        os.makedirs(dbg_dir, exist_ok=True)
+        fname = _sanitize_filename(url) + ".html"
+        fpath = os.path.join(dbg_dir, fname)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.warning("Saved debug HTML to %s", fpath)
+    except Exception as e:
+        logger.warning("Failed to save debug HTML: %s", e)
 
 def ensure_db():
     os.makedirs(os.path.dirname(STATE_DB), exist_ok=True)
@@ -226,11 +415,32 @@ def get_items_for_target(target: str):
     url = normalize_target(target)
     html = fetch(url)
     items = extract_items_next_data(html)
-    if items is None:
-        logger.debug("NEXT_DATA extraction failed; falling back to HTML parsing")
+    if items is None or len(items) == 0:
+        logger.debug("NEXT_DATA extraction failed or empty; trying JSON-LD")
+        jitems = extract_items_jsonld(html)
+        if jitems:
+            items = jitems
+    if not items:
+        logger.debug("JSON-LD extraction failed; falling back to HTML parsing")
         items = extract_items_html(html)
-    logger.info("Found %d items for %s", len(items), url)
-    return url, items
+    # If still zero, optionally dump HTML for debugging
+    if (not items) and DEBUG_DUMP_HTML:
+        try:
+            os.makedirs("/data/debug", exist_ok=True)
+            # create safe filename from url
+            safe = re.sub(r'[^a-zA-Z0-9_.-]+', '_', url)
+            fname = f"/data/debug/{safe}.html"
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.warning("Parsed 0 items for %s. Saved HTML to %s for inspection.", url, fname)
+        except Exception as e:
+            logger.warning("Failed to dump HTML for %s: %s", url, e)
+    else:
+        if DEBUG_LOG_SAMPLES:
+            sample = items[:3]
+            logger.debug("Sample parsed items for %s: %s", url, sample)
+    logger.info("Found %d items for %s", len(items) if items else 0, url)
+    return url, (items or [])
 
 def now_utc_iso():
     return datetime.datetime.now(tz=pytz.UTC).isoformat()

@@ -22,5 +22,7 @@ services:
       LOG_FILE: "/data/monitor.log"
       LOG_MAX_BYTES: 2097152
       LOG_BACKUPS: 3
+      DEBUG_DUMP_HTML: "true"
+      DEBUG_LOG_SAMPLES: "true"
     volumes:
       - ./data:/data
