@@ -286,7 +286,7 @@ def normalize_target(t: str) -> str:
     # Accept username or full URL
     if t.startswith("http://") or t.startswith("https://"):
         return t
-    return f"https://throne.com/u/{t}/wishlist"
+    return f"https://throne.com/{t}"
 
 def extract_items_next_data(html: str):
     soup = BeautifulSoup(html, "lxml")
@@ -298,28 +298,40 @@ def extract_items_next_data(html: str):
     except Exception:
         return None
 
-    items = []
+    found = []
 
-    def deep_iter(node, path=""):
-        nonlocal items
+    def is_item_list(lst):
+        # Heuristic: list of dicts with name/title and price/price_cents
+        if not isinstance(lst, list):
+            return False
+        count = 0
+        for x in lst:
+            if isinstance(x, dict) and (
+                ("name" in x or "title" in x)
+                and any(k in x for k in ("price", "price_cents", "priceCents"))
+            ):
+                count += 1
+        return count >= 1
+
+    def deep_iter(node):
+        nonlocal found
         if isinstance(node, dict):
-            if "items" in node and isinstance(node["items"], list):
-                maybe = node["items"]
-                if any(isinstance(x, dict) and ("name" in x or "title" in x) for x in maybe):
-                    items = maybe
-            for k, v in node.items():
-                deep_iter(v, path + f".{k}")
+            for v in node.values():
+                deep_iter(v)
         elif isinstance(node, list):
-            for i, v in enumerate(node):
-                deep_iter(v, path + f"[{i}]")
+            if is_item_list(node):
+                found = node
+                return
+            for v in node:
+                deep_iter(v)
 
     deep_iter(data)
 
-    if not items:
+    if not found:
         return None
 
     normalized = []
-    for it in items:
+    for it in found:
         name = it.get("name") or it.get("title") or ""
         price = it.get("price") or it.get("price_cents") or it.get("priceCents")
         currency = it.get("currency") or it.get("currencyCode") or "USD"
