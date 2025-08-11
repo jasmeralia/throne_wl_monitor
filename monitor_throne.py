@@ -432,14 +432,14 @@ def get_items_for_target(target: str):
         jitems = extract_items_jsonld(html)
         if jitems:
             items = jitems
-    if not items:
-        logger.debug("JSON-LD extraction failed; falling back to HTML parsing")
-        items = extract_items_html(html)
-    # If still zero, optionally dump HTML for debugging
+    if not items or len(items) < 40:  # fallback if too few items found
+        logger.debug("JSON-LD/HTML extraction failed or too few items; trying grid extraction")
+        grid_items = extract_items_grid(html)
+        if grid_items and len(grid_items) > (len(items) if items else 0):
+            items = grid_items
     if (not items) and DEBUG_DUMP_HTML:
         try:
             os.makedirs("/data/debug", exist_ok=True)
-            # create safe filename from url
             safe = re.sub(r'[^a-zA-Z0-9_.-]+', '_', url)
             fname = f"/data/debug/{safe}.html"
             with open(fname, "w", encoding="utf-8") as f:
